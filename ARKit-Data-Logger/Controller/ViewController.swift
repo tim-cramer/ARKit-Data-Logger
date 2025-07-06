@@ -1,405 +1,321 @@
-//
-//  ViewController.swift
-//  ARKit-Data-Logger
-//
-//  Created by kimpyojin on 04/06/2019.
-//  Copyright © 2019 Pyojin Kim. All rights reserved.
-//
-
 import UIKit
 import SceneKit
 import ARKit
 import os.log
-import Accelerate
-
+import Zip // 👈 Add this import for the zipping functionality
 
 class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     
-    // cellphone screen UI outlet objects
+    // MARK: - IBOutlets
     @IBOutlet weak var startStopButton: UIButton!
     @IBOutlet weak var statusLabel: UILabel!
-    
     @IBOutlet var sceneView: ARSCNView!
-    
     @IBOutlet weak var numberOfFeatureLabel: UILabel!
     @IBOutlet weak var trackingStatusLabel: UILabel!
     @IBOutlet weak var worldMappingStatusLabel: UILabel!
     @IBOutlet weak var updateRateLabel: UILabel!
     
-    // constants for collecting data
-    let numTextFiles = 2
-    let ARKIT_CAMERA_POSE = 0
-    let ARKIT_POINT_CLOUD = 1
+    // MARK: - Properties
     var isRecording: Bool = false
-    let customQueue: DispatchQueue = DispatchQueue(label: "pyojinkim.me")
-    var accumulatedPointCloud = AccumulatedPointCloud()
+    let customQueue = DispatchQueue(label: "me.pyojinkim.arkitlogger", qos: .userInitiated, attributes: .concurrent)
+    let captureInterval: TimeInterval = 1.0 / 10.0 // 10 FPS
+    var lastCaptureTime: TimeInterval = 0
     
+    let poseDataBatchSize = 100
+    var poseDataBuffer: [String] = []
     
-    // variables for measuring time in iOS clock
-    var recordingTimer: Timer = Timer()
+    let ARKIT_CAMERA_POSE = 0
+    let ARKIT_CAMERA_INTRINSICS = 1
+    var fileHandlers: [FileHandle] = []
+    var sessionPath: URL?
+    
+    var recordingTimer: Timer?
     var secondCounter: Int64 = 0 {
-        didSet {
-            statusLabel.text = interfaceIntTime(second: secondCounter)
-        }
+        didSet { statusLabel.text = interfaceIntTime(second: secondCounter) }
     }
-    var previousTimestamp: Double = 0
-    let mulSecondToNanoSecond: Double = 1000000000
     
-    
-    // text file input & output
-    var fileHandlers = [FileHandle]()
-    var fileURLs = [URL]()
-    var fileNames: [String] = ["ARKit_camera_pose.txt", "ARKit_point_cloud.txt"]
-    
-    
+    // The CIContext is used for converting pixel buffers to image data.
+    let ciContext = CIContext(options: nil)
+
+    // MARK: - View Lifecycle
     override func viewDidLoad() {
         super.viewDidLoad()
-        
-        // set debug option
-        self.sceneView.debugOptions = [ARSCNDebugOptions.showFeaturePoints, ARSCNDebugOptions.showWorldOrigin]
-        
-        
-        // change status text to "Ready"
-        statusLabel.text = "Ready"
-        
-        
-        // set the view's delegate
-        sceneView.delegate = self
-        sceneView.showsStatistics = true
-        sceneView.session.delegate = self
+        setupUI()
+        setupAR()
     }
-    
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        
-        // Create a session configuration
-        let configuration = ARWorldTrackingConfiguration()
-        
-        // Run the view's session
-        sceneView.session.run(configuration)
+        restartARSession()
     }
-    
     
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        
-        // Pause the view's session
         sceneView.session.pause()
     }
     
-    
-    // when the Start/Stop button is pressed
+    // MARK: - Setup
+    private func setupUI() {
+        statusLabel.text = "Ready"
+    }
+
+    private func setupAR() {
+        sceneView.delegate = self
+        sceneView.session.delegate = self
+        sceneView.debugOptions = [ARSCNDebugOptions.showFeaturePoints, ARSCNDebugOptions.showWorldOrigin]
+    }
+
+    func restartARSession() {
+        let configuration = ARWorldTrackingConfiguration()
+        sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+    }
+
+    // MARK: - Main Action
     @IBAction func startStopButtonPressed(_ sender: UIButton) {
-        if (self.isRecording == false) {
-            
-            // start ARKit data recording
+        if !isRecording {
             customQueue.async {
-                if (self.createFiles()) {
-                    DispatchQueue.main.async {
-                        // reset timer
-                        self.secondCounter = 0
-                        self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true, block: { (Timer) -> Void in
-                            self.secondCounter += 1
-                        })
-                        
-                        // update UI
-                        self.startStopButton.setTitle("Stop", for: .normal)
-                        
-                        // make sure the screen won't lock
-                        UIApplication.shared.isIdleTimerDisabled = true
-                    }
-                    self.isRecording = true
-                } else {
-                    self.errorMsg(msg: "Failed to create the file")
+                guard self.createSessionDirectoryAndFiles() else {
+                    self.errorMsg(msg: "Failed to create files.")
                     return
+                }
+                DispatchQueue.main.async {
+                    self.isRecording = true
+                    self.updateUIForRecording(true)
                 }
             }
         } else {
-            
-            // stop recording and share the recorded text file
-            if (recordingTimer.isValid) {
-                recordingTimer.invalidate()
-            }
-            
+            isRecording = false
+            updateUIForRecording(false)
+
             customQueue.async {
-                self.isRecording = false
+                self.flushPoseBuffer()
+                self.closeFiles()
                 
-                // save ARKit 3D point cloud only for visualization
-                for i in 0...(self.accumulatedPointCloud.count - 1) {
-                    let ARKitPointData = String(format: "%.6f %.6f %.6f %d %d %d \n",
-                                                self.accumulatedPointCloud.points[i].x,
-                                                self.accumulatedPointCloud.points[i].y,
-                                                self.accumulatedPointCloud.points[i].z,
-                                                self.accumulatedPointCloud.colors[i].x,
-                                                self.accumulatedPointCloud.colors[i].y,
-                                                self.accumulatedPointCloud.colors[i].z)
-                    if let ARKitPointDataToWrite = ARKitPointData.data(using: .utf8) {
-                        self.fileHandlers[self.ARKIT_POINT_CLOUD].write(ARKitPointDataToWrite)
-                    } else {
-                        os_log("Failed to write data record", log: OSLog.default, type: .fault)
-                    }
-                }
-                
-                // close the file handlers
-                if (self.fileHandlers.count == self.numTextFiles) {
-                    for handler in self.fileHandlers {
-                        handler.closeFile()
-                    }
+                if let zipURL = self.zipSessionFolder(at: self.sessionPath) {
                     DispatchQueue.main.async {
-                        let activityVC = UIActivityViewController(activityItems: self.fileURLs, applicationActivities: nil)
-                        self.present(activityVC, animated: true, completion: nil)
+                        self.presentShareSheet(for: zipURL)
                     }
-                }
-            }
-            
-            // initialize UI on the screen
-            self.numberOfFeatureLabel.text = ""
-            self.trackingStatusLabel.text = ""
-            self.worldMappingStatusLabel.text = ""
-            self.updateRateLabel.text = ""
-            
-            self.startStopButton.setTitle("Start", for: .normal)
-            self.statusLabel.text = "Ready"
-            
-            // resume screen lock
-            UIApplication.shared.isIdleTimerDisabled = false
-        }
-    }
-    
-    
-    // define if ARSession is didUpdate (callback function)
-    func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        
-        // obtain current transformation 4x4 matrix
-        let timestamp = frame.timestamp * self.mulSecondToNanoSecond
-        let updateRate = self.mulSecondToNanoSecond / Double(timestamp - previousTimestamp)
-        previousTimestamp = timestamp
-        
-        let imageFrame = frame.capturedImage
-        let imageResolution = frame.camera.imageResolution
-        let K = frame.camera.intrinsics
-        
-        let ARKitWorldMappingStatus = frame.worldMappingStatus.rawValue
-        let ARKitTrackingState = frame.camera.trackingState
-        let T_gc = frame.camera.transform
-        
-        let r_11 = T_gc.columns.0.x
-        let r_12 = T_gc.columns.1.x
-        let r_13 = T_gc.columns.2.x
-        
-        let r_21 = T_gc.columns.0.y
-        let r_22 = T_gc.columns.1.y
-        let r_23 = T_gc.columns.2.y
-        
-        let r_31 = T_gc.columns.0.z
-        let r_32 = T_gc.columns.1.z
-        let r_33 = T_gc.columns.2.z
-        
-        let t_x = T_gc.columns.3.x
-        let t_y = T_gc.columns.3.y
-        let t_z = T_gc.columns.3.z
-        
-        // dispatch queue to display UI
-        DispatchQueue.main.async {
-            self.numberOfFeatureLabel.text = String(format:"%05d", self.accumulatedPointCloud.count)
-            self.trackingStatusLabel.text = "\(ARKitTrackingState)"
-            self.updateRateLabel.text = String(format:"%.3f Hz", updateRate)
-            
-            var worldMappingStatus = ""
-            switch ARKitWorldMappingStatus {
-            case 0:
-                worldMappingStatus = "notAvailable"
-            case 1:
-                worldMappingStatus = "limited"
-            case 2:
-                worldMappingStatus = "extending"
-            case 3:
-                worldMappingStatus = "mapped"
-            default:
-                worldMappingStatus = "switch default?"
-            }
-            self.worldMappingStatusLabel.text = "\(worldMappingStatus)"
-        }
-        
-        // custom queue to save ARKit processing data
-        self.customQueue.async {
-            if ((self.fileHandlers.count == self.numTextFiles) && self.isRecording) {
-                
-                // 1) record ARKit 6-DoF camera pose
-                let ARKitPoseData = String(format: "%.0f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f \n",
-                                           timestamp,
-                                           r_11, r_12, r_13, t_x,
-                                           r_21, r_22, r_23, t_y,
-                                           r_31, r_32, r_33, t_z)
-                if let ARKitPoseDataToWrite = ARKitPoseData.data(using: .utf8) {
-                    self.fileHandlers[self.ARKIT_CAMERA_POSE].write(ARKitPoseDataToWrite)
                 } else {
-                    os_log("Failed to write data record", log: OSLog.default, type: .fault)
-                }
-                
-                // 2) record ARKit 3D point cloud only for visualization
-                if let rawFeaturePointsArray = frame.rawFeaturePoints {
-                    
-                    // constants for feature points
-                    let points = rawFeaturePointsArray.points
-                    let identifiers = rawFeaturePointsArray.identifiers
-                    let pointsCount = points.count
-                    
-                    let kDownscaleFactor: CGFloat = 4.0
-                    let scale = Double(1 / kDownscaleFactor)
-                    
-                    var projectedPoints = [CGPoint]()
-                    var validPoints = [vector_float3]()
-                    var validIdentifiers = [UInt64]()
-                    
-                    
-                    // project all feature points into image 2D coordinate
-                    for i in 0...(pointsCount - 1) {
-                        let projectedPoint = frame.camera.projectPoint(points[i], orientation: .landscapeRight, viewportSize: imageResolution)
-                        if ((projectedPoint.x >= 0 && projectedPoint.x <= imageResolution.width - 1) &&
-                            (projectedPoint.y >= 0 && projectedPoint.y <= imageResolution.height - 1)) {
-                            projectedPoints.append(projectedPoint)
-                            validPoints.append(points[i])
-                            validIdentifiers.append(identifiers[i])
-                        }
-                    }
-                    
-                    
-                    // compute scaled YCbCr image buffer
-                    let scaledBuffer = self.IBASampleScaledCapturedPixelBuffer(imageFrame: imageFrame, scale: scale)
-                    let scaledLumaBuffer = scaledBuffer.0
-                    let scaledCbcrBuffer = scaledBuffer.1
-                    
-                    
-                    // perform YCbCr image sampling
-                    for i in 0...(projectedPoints.count - 1) {
-                        let projectedPoint = projectedPoints[i]
-                        let lumaPoint = CGPoint(x: Double(projectedPoint.x) * scale, y: Double(projectedPoint.y) * scale)
-                        let cbcrPoint = CGPoint(x: Double(projectedPoint.x) * scale, y: Double(projectedPoint.y) * scale)
-                        
-                        let lumaPixelAddress = scaledLumaBuffer.data + scaledLumaBuffer.rowBytes * Int(lumaPoint.y) + Int(lumaPoint.x)
-                        let cbcrPixelAddress = scaledCbcrBuffer.data + scaledCbcrBuffer.rowBytes * Int(cbcrPoint.y) + Int(cbcrPoint.x) * 2;
-                        
-                        let luma = lumaPixelAddress.load(as: UInt8.self)
-                        let cb = cbcrPixelAddress.load(as: UInt8.self)
-                        let cr = (cbcrPixelAddress + 1).load(as: UInt8.self)
-                        
-                        let color = simd_make_uint3(UInt32(luma), UInt32(cb), UInt32(cr))
-                        self.accumulatedPointCloud.appendPointCloud(validPoints[i], validIdentifiers[i], color)
-                    }
+                    self.errorMsg(msg: "Failed to create zip file.")
                 }
             }
         }
     }
-    
-    
-    // some useful functions
-    private func errorMsg(msg: String) {
+
+    // MARK: - ARSessionDelegate
+    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        guard isRecording, frame.timestamp - lastCaptureTime >= captureInterval else { return }
+        lastCaptureTime = frame.timestamp
+        
+        // --- PERFORMANCE FIX ---
+        // Capture the necessary properties from the frame on the main thread.
+        let timestamp = frame.timestamp
+        let cameraTransform = frame.camera.transform
+        let capturedImage = frame.capturedImage // This is a CVPixelBuffer
+        
+        // Dispatch all heavy work to the background queue.
+        customQueue.async {
+            // 1. Do the slow image conversion IN THE BACKGROUND.
+            let jpgData = self.uiImageFrom(pixelBuffer: capturedImage)?.jpegData(compressionQuality: 0.75)
+            
+            // 2. Log the pose data.
+            self.logPose(timestamp: timestamp, transform: cameraTransform)
+            
+            // 3. Write the image data to a file.
+            if let data = jpgData {
+                self.logImage(timestamp: timestamp, jpgData: data)
+            }
+        }
+        
+        // Update the UI on the main thread.
         DispatchQueue.main.async {
-            let fileAlert = UIAlertController(title: "ARKit-Data-Logger", message: msg, preferredStyle: .alert)
-            fileAlert.addAction(UIAlertAction(title: "OK", style: .cancel, handler: nil))
-            self.present(fileAlert, animated: true, completion: nil)
+            self.updateDebugUI(with: frame)
         }
     }
     
+    // MARK: - Logging Logic
+    private func logPose(timestamp: TimeInterval, transform: simd_float4x4) {
+        let nanosecondTimestamp = timestamp * 1_000_000_000
+        let poseString = String(format: "%.0f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+                                nanosecondTimestamp,
+                                transform.columns.0.x, transform.columns.1.x, transform.columns.2.x, transform.columns.3.x,
+                                transform.columns.0.y, transform.columns.1.y, transform.columns.2.y, transform.columns.3.y,
+                                transform.columns.0.z, transform.columns.1.z, transform.columns.2.z, transform.columns.3.z)
+        
+        poseDataBuffer.append(poseString)
+        if poseDataBuffer.count >= poseDataBatchSize {
+            flushPoseBuffer()
+        }
+    }
     
-    private func createFiles() -> Bool {
+    private func logImage(timestamp: TimeInterval, jpgData: Data) {
+        guard let colorPath = self.sessionPath?.appendingPathComponent("color") else { return }
+        let nanosecondTimestamp = timestamp * 1_000_000_000
+        let filename = colorPath.appendingPathComponent("\(String(format: "%.0f", nanosecondTimestamp)).jpg")
         
-        // initialize file handlers
-        self.fileHandlers.removeAll()
-        self.fileURLs.removeAll()
+        do {
+            try jpgData.write(to: filename)
+        } catch {
+            os_log("Failed to write JPG data: %@", log: .default, type: .error, error.localizedDescription)
+        }
+    }
+    
+    private func uiImageFrom(pixelBuffer: CVPixelBuffer) -> UIImage? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        if let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) {
+            return UIImage(cgImage: cgImage)
+        }
+        return nil
+    }
+    
+    // MARK: - File I/O & Sharing
+    private func createSessionDirectoryAndFiles() -> Bool {
+        fileHandlers.removeAll(); poseDataBuffer.removeAll()
         
-        // create ARKit result text files
-        let startHeader = ""
-        for i in 0...(self.numTextFiles - 1) {
-            var url = URL(fileURLWithPath: NSTemporaryDirectory())
-            url.appendPathComponent(fileNames[i])
-            self.fileURLs.append(url)
-            
-            // delete previous text files
-            if (FileManager.default.fileExists(atPath: url.path)) {
-                do {
-                    try FileManager.default.removeItem(at: url)
-                } catch {
-                    os_log("cannot remove previous file", log:.default, type:.error)
-                    return false
-                }
-            }
-            
-            // create new text files
-            if (!FileManager.default.createFile(atPath: url.path, contents: startHeader.data(using: String.Encoding.utf8), attributes: nil)) {
-                self.errorMsg(msg: "cannot create file \(self.fileNames[i])")
-                return false
-            }
-            
-            // assign new file handlers
-            let fileHandle: FileHandle? = FileHandle(forWritingAtPath: url.path)
-            if let handle = fileHandle {
-                self.fileHandlers.append(handle)
-            } else {
+        guard let docPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
+        
+        let newSessionPath = docPath.appendingPathComponent("arkit_session_\(timeToString(true))")
+        let colorFolderPath = newSessionPath.appendingPathComponent("color")
+
+        do {
+            try FileManager.default.createDirectory(at: colorFolderPath, withIntermediateDirectories: true, attributes: nil)
+            self.sessionPath = newSessionPath
+        } catch {
+            os_log("Failed to create session directory: %@", log: .default, type: .error, error.localizedDescription)
+            return false
+        }
+        
+        let fileNames = ["ARKit_camera_pose.txt", "ARKit_camera_intrinsics.txt"]
+        for i in 0..<fileNames.count {
+            let url = newSessionPath.appendingPathComponent(fileNames[i])
+            do {
+                try "".write(to: url, atomically: true, encoding: .utf8)
+                let fileHandle = try FileHandle(forWritingTo: url)
+                fileHandlers.append(fileHandle)
+            } catch {
+                os_log("Failed to create file handle for %@: %@", log: .default, type: .error, url.lastPathComponent, error.localizedDescription)
                 return false
             }
         }
         
-        // write current recording time information
-        let timeHeader = "# Created at \(timeToString()) in Burnaby Canada \n"
-        for i in 0...(self.numTextFiles - 1) {
-            if let timeHeaderToWrite = timeHeader.data(using: .utf8) {
-                self.fileHandlers[i].write(timeHeaderToWrite)
-            } else {
-                os_log("Failed to write data record", log: OSLog.default, type: .fault)
-                return false
-            }
+        let timeHeader = "# Created at \(timeToString())\n"
+        fileHandlers.forEach { $0.write(timeHeader.data(using: .utf8)!) }
+        
+        fileHandlers[ARKIT_CAMERA_INTRINSICS].write("fx, fy, ox, oy\n".data(using: .utf8)!)
+        if let intrinsics = sceneView.session.currentFrame?.camera.intrinsics {
+            let i = intrinsics.columns
+            fileHandlers[ARKIT_CAMERA_INTRINSICS].write("\(i.0.x), \(i.1.y), \(i.2.x), \(i.2.y)\n".data(using: .utf8)!)
         }
         
-        // return true if everything is alright
         return true
     }
     
-    
-    private func IBAPixelBufferGetPlanarBuffer(pixelBuffer: CVPixelBuffer, planeIndex: size_t) -> vImage_Buffer {
-        
-        // assumes that pixel buffer base address is already locked
-        let baseAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, planeIndex)
-        let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, planeIndex)
-        let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, planeIndex)
-        let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, planeIndex)
-        
-        return vImage_Buffer(data: baseAddress, height: vImagePixelCount(height), width: vImagePixelCount(width), rowBytes: bytesPerRow)
+    private func flushPoseBuffer() {
+        guard !poseDataBuffer.isEmpty, fileHandlers.indices.contains(ARKIT_CAMERA_POSE) else { return }
+        fileHandlers[ARKIT_CAMERA_POSE].write(poseDataBuffer.joined().data(using: .utf8)!)
+        poseDataBuffer.removeAll()
     }
     
+    private func closeFiles() {
+        fileHandlers.forEach { $0.closeFile() }
+    }
     
-    private func IBASampleScaledCapturedPixelBuffer(imageFrame: CVPixelBuffer, scale: Double) -> (vImage_Buffer, vImage_Buffer) {
+    private func presentShareSheet(for url: URL) {
+        let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        if let popover = activityVC.popoverPresentationController {
+            popover.sourceView = self.view
+            popover.sourceRect = self.startStopButton.frame
+        }
+        activityVC.completionWithItemsHandler = { _, _, _, _ in
+            try? FileManager.default.removeItem(at: url)
+        }
+        self.present(activityVC, animated: true)
+    }
+
+    // --- ZIPPING FIX ---
+    // This function now uses the Zip library to create a valid zip archive.
+    private func zipSessionFolder(at sourceURL: URL?) -> URL? {
+        guard let sourceURL = sourceURL else { return nil }
         
-        // calculate scaled size for buffers
-        let baseWidth = Double(CVPixelBufferGetWidth(imageFrame))
-        let baseHeight = Double(CVPixelBufferGetHeight(imageFrame))
+        do {
+            let zipURL = FileManager.default.temporaryDirectory.appendingPathComponent(sourceURL.lastPathComponent + ".zip")
+            
+            // This will create a REAL zip file at the destination URL
+            try Zip.zipFiles(paths: [sourceURL], zipFilePath: zipURL, password: nil, progress: nil)
+            
+            return zipURL
+        } catch {
+            os_log("Failed to create zip file: %@", log: .default, type: .error, error.localizedDescription)
+            return nil
+        }
+    }
+    
+    // MARK: - UI Helpers
+    private func updateUIForRecording(_ isRecording: Bool) {
+        if isRecording {
+            startStopButton.setTitle("Stop", for: .normal)
+            startStopButton.setTitleColor(.systemRed, for: .normal)
+            UIApplication.shared.isIdleTimerDisabled = true
+            secondCounter = 0
+            recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.secondCounter += 1
+            }
+        } else {
+            startStopButton.setTitle("Start", for: .normal)
+            startStopButton.setTitleColor(.systemGreen, for: .normal)
+            UIApplication.shared.isIdleTimerDisabled = false
+            recordingTimer?.invalidate()
+            statusLabel.text = "Ready"
+            [numberOfFeatureLabel, trackingStatusLabel, worldMappingStatusLabel, updateRateLabel].forEach { $0?.text = "-" }
+        }
+    }
+    
+    private func updateDebugUI(with frame: ARFrame) {
+        numberOfFeatureLabel.text = String(format: "%d", frame.rawFeaturePoints?.points.count ?? 0)
+        trackingStatusLabel.text = string(for: frame.camera.trackingState)
         
-        let scaledWidth = vImagePixelCount(ceil(baseWidth * scale))
-        let scaledHeight = vImagePixelCount(ceil(baseHeight * scale))
-        
-        
-        // lock the source pixel buffer
-        CVPixelBufferLockBaseAddress(imageFrame, CVPixelBufferLockFlags.readOnly)
-        
-        // allocate buffer for scaled Luma & retrieve address of source Luma and scale it
-        var scaledLumaBuffer = vImage_Buffer()
-        var sourceLumaBuffer = self.IBAPixelBufferGetPlanarBuffer(pixelBuffer: imageFrame, planeIndex: 0)
-        vImageBuffer_Init(&scaledLumaBuffer, scaledHeight, scaledWidth, 8, vImage_Flags(kvImagePrintDiagnosticsToConsole))
-        vImageScale_Planar8(&sourceLumaBuffer, &scaledLumaBuffer, nil, vImage_Flags(kvImagePrintDiagnosticsToConsole))
-        
-        // allocate buffer for scaled CbCr & retrieve address of source CbCr and scale it
-        var scaledCbcrBuffer = vImage_Buffer()
-        var sourceCbcrBuffer = self.IBAPixelBufferGetPlanarBuffer(pixelBuffer: imageFrame, planeIndex: 1)
-        vImageBuffer_Init(&scaledCbcrBuffer, scaledHeight, scaledWidth, 8, vImage_Flags(kvImagePrintDiagnosticsToConsole))
-        vImageScale_CbCr8(&sourceCbcrBuffer, &scaledCbcrBuffer, nil, vImage_Flags(kvImagePrintDiagnosticsToConsole))
-        
-        // unlock source buffer now
-        CVPixelBufferUnlockBaseAddress(imageFrame, CVPixelBufferLockFlags.readOnly)
-        
-        
-        // return the scaled Luma and CbCr buffer
-        return (scaledLumaBuffer, scaledCbcrBuffer)
+        var statusText = ""
+        switch frame.worldMappingStatus {
+        case .notAvailable: statusText = "Not Available"
+        case .limited: statusText = "Limited"
+        case .extending: statusText = "Extending"
+        case .mapped: statusText = "Mapped"
+        @unknown default: statusText = "Unknown"
+        }
+        worldMappingStatusLabel.text = statusText
+    }
+    
+    private func errorMsg(msg: String) {
+        DispatchQueue.main.async {
+            let alert = UIAlertController(title: "Error", message: msg, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default, handler: nil))
+            self.present(alert, animated: true)
+        }
+    }
+    
+    private func string(for trackingState: ARCamera.TrackingState) -> String {
+        switch trackingState {
+        case .notAvailable: return "Not Available"
+        case .limited(let reason):
+            switch reason {
+            case .excessiveMotion: return "Limited: Excessive Motion"
+            case .insufficientFeatures: return "Limited: Insufficient Features"
+            case .initializing: return "Limited: Initializing"
+            case .relocalizing: return "Limited: Relocalizing"
+            @unknown default: return "Limited: Unknown Reason"
+            }
+        case .normal: return "Normal"
+        }
+    }
+    
+    func interfaceIntTime(second: Int64) -> String {
+        let minutes = (second / 60) % 60, seconds = second % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+    
+    func timeToString(_ forFilename: Bool = false) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = forFilename ? "yyyy-MM-dd_HH-mm-ss" : "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: Date())
     }
 }
