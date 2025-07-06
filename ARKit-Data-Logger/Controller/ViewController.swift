@@ -163,7 +163,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     private func uiImageFrom(pixelBuffer: CVPixelBuffer) -> UIImage? {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         if let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) {
-            return UIImage(cgImage: cgImage)
+            return UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
         }
         return nil
     }
