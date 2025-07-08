@@ -110,13 +110,13 @@
                                 </userDefinedRuntimeAttributes>
                             </view>
                             <view alpha="0.69999999999999996" contentMode="scaleToFill" translatesAutoresizingMaskIntoConstraints="NO" id="xNy-pf-8Wl" userLabel="Bottom">
-                                <rect key="frame" x="20" y="622" width="335" height="110"/>
+                                <rect key="frame" x="20" y="607" width="335" height="125"/>
                                 <subviews>
                                     <stackView opaque="NO" contentMode="scaleToFill" axis="vertical" distribution="fillEqually" spacing="8" translatesAutoresizingMaskIntoConstraints="NO" id="2vX-K4-J6P">
-                                        <rect key="frame" x="8" y="8" width="319" height="94"/>
+                                        <rect key="frame" x="8" y="8" width="319" height="109"/>
                                         <subviews>
                                             <button opaque="NO" contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="system" lineBreakMode="middleTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="ZMx-3q-ROk">
-                                                <rect key="frame" x="0.0" y="0.0" width="319" height="43"/>
+                                                <rect key="frame" x="0.0" y="0.0" width="319" height="31"/>
                                                 <fontDescription key="fontDescription" name="HelveticaNeue-Bold" family="Helvetica Neue" pointSize="26"/>
                                                 <state key="normal" title="Start">
                                                     <color key="titleColor" red="0.25268453360000004" green="0.80687397720000009" blue="0.39213398100000002" alpha="1" colorSpace="custom" customColorSpace="displayP3"/>
@@ -125,8 +125,11 @@
                                                     <action selector="startStopButtonPressed:" destination="BV1-FR-VrT" eventType="touchUpInside" id="LwI-xP-6Oi"/>
                                                 </connections>
                                             </button>
+                                            <progressView opaque="NO" contentMode="scaleToFill" verticalHuggingPriority="750" progress="0.5" translatesAutoresizingMaskIntoConstraints="NO" id="Hwd-zr-HCe">
+                                                <rect key="frame" x="0.0" y="39" width="319" height="31"/>
+                                            </progressView>
                                             <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Ready" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="0rc-7R-umg">
-                                                <rect key="frame" x="0.0" y="51" width="319" height="43"/>
+                                                <rect key="frame" x="0.0" y="78" width="319" height="31"/>
                                                 <fontDescription key="fontDescription" name="HelveticaNeue-Bold" family="Helvetica Neue" pointSize="26"/>
                                                 <color key="textColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
                                                 <nil key="highlightedColor"/>
@@ -165,6 +168,7 @@
                     </view>
                     <connections>
                         <outlet property="numberOfFeatureLabel" destination="TE6-DE-7yr" id="Kdt-o0-aMa"/>
+                        <outlet property="progressView" destination="Hwd-zr-HCe" id="UDB-UV-OcG"/>
                         <outlet property="sceneView" destination="BrB-h1-WRS" id="5nT-qQ-ynl"/>
                         <outlet property="startStopButton" destination="ZMx-3q-ROk" id="Eqo-qP-vbu"/>
                         <outlet property="statusLabel" destination="0rc-7R-umg" id="rSy-BI-oTH"/>
