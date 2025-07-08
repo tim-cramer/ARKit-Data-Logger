@@ -109,7 +109,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     // MARK: - Properties
     var isRecording: Bool = false
     let customQueue = DispatchQueue(label: "me.pyojinkim.arkitlogger", qos: .userInitiated, attributes: .concurrent)
-    let captureInterval: TimeInterval = 1.0 / 10.0 // 10 FPS
+    let captureInterval: TimeInterval = 1.0 / 5.0 // 10 FPS
     var lastCaptureTime: TimeInterval = 0
     
     let poseDataBatchSize = 100
@@ -119,6 +119,8 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     let ARKIT_CAMERA_INTRINSICS = 1
     var fileHandlers: [FileHandle] = []
     var sessionPath: URL?
+    
+    let TARGET_MAX_LENGTH: CGFloat = 640.0
     
     var recordingTimer: Timer?
     var secondCounter: Int64 = 0 {
@@ -217,6 +219,9 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
                 switch result {
                 case .success:
                     self.statusLabel.text = "✅ Upload Complete!"
+                    if let sessionPath = self.sessionPath {
+                              try? FileManager.default.removeItem(at: sessionPath)
+                          }
                     self.startStopButton.isEnabled = true
                     self.resetUIState()
                     
@@ -237,16 +242,58 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         
         let timestamp = frame.timestamp
         let cameraTransform = frame.camera.transform
-        let capturedImage = frame.capturedImage
         
+        // Process everything on the background thread
         customQueue.async {
-            let jpgData = self.uiImageFrom(pixelBuffer: capturedImage)?.jpegData(compressionQuality: 0.75)
-            self.logPose(timestamp: timestamp, transform: cameraTransform)
-            if let data = jpgData {
-                self.logImage(timestamp: timestamp, jpgData: data)
+            // Step 1: Create a CIImage from the camera's pixel buffer.
+            let ciImage = CIImage(cvPixelBuffer: frame.capturedImage)
+
+            // Step 2: Create a CGImage from the CIImage. This is a crucial intermediate step.
+            guard let cgImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+                os_log("FATAL: Failed to create CGImage from CIImage.", log: .default, type: .fault)
+                return
             }
+            
+            // Step 3: Create the final, correctly oriented UIImage.
+            // The .right orientation is necessary to correct the raw landscape buffer from the camera.
+            // Use scale 1.0 to avoid any scaling artifacts
+            let correctlyOrientedImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
+            
+            // Step 4: Resize the new, stable image.
+            guard let resizedImage = correctlyOrientedImage.resizedToFit(maxLength: 640) else {
+                os_log("FATAL: Image resizing failed. Check the resizedToFit extension.", log: .default, type: .fault)
+                return
+            }
+            
+            os_log("Final image size before saving: W:%.0f, H:%.0f", log: .default, type: .debug, resizedImage.size.width, resizedImage.size.height)
+
+            guard let jpgData = resizedImage.jpegData(compressionQuality: 0.75) else {
+                os_log("FATAL: Could not get JPEG data from the resized image.", log: .default, type: .fault)
+                return
+            }
+
+            // DEBUG: Verify what's actually in the JPEG data
+            if let verifyImage = UIImage(data: jpgData) {
+                os_log("JPEG verification: size=%.0fx%.0f, scale=%.1f", log: .default, type: .debug,
+                       verifyImage.size.width, verifyImage.size.height, verifyImage.scale)
+                
+                // Check the actual pixel dimensions
+                if let cgImage = verifyImage.cgImage {
+                    os_log("JPEG verification: actual pixels=%dx%d", log: .default, type: .debug,
+                           cgImage.width, cgImage.height)
+                }
+            } else {
+                os_log("FATAL: Could not recreate UIImage from JPEG data!", log: .default, type: .fault)
+            }
+
+            os_log("JPEG data size: %d bytes", log: .default, type: .debug, jpgData.count)
+
+            // Log pose and image data
+            self.logPose(timestamp: timestamp, transform: cameraTransform)
+            self.logImage(timestamp: timestamp, jpgData: jpgData)
         }
         
+        // Update UI on the main thread
         DispatchQueue.main.async {
             self.updateDebugUI(with: frame)
         }
@@ -277,14 +324,6 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         } catch {
             os_log("Failed to write JPG data: %@", log: .default, type: .error, error.localizedDescription)
         }
-    }
-    
-    private func uiImageFrom(pixelBuffer: CVPixelBuffer) -> UIImage? {
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        if let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) {
-            return UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-        }
-        return nil
     }
     
     // MARK: - File I/O & Zipping (Unchanged)
@@ -318,16 +357,58 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         }
         
         let timeHeader = "# Created at \(timeToString())\n"
-        fileHandlers.forEach { $0.write(timeHeader.data(using: .utf8)!) }
-        
-        fileHandlers[ARKIT_CAMERA_INTRINSICS].write("fx, fy, ox, oy\n".data(using: .utf8)!)
-        if let intrinsics = sceneView.session.currentFrame?.camera.intrinsics {
-            let i = intrinsics.columns
-            fileHandlers[ARKIT_CAMERA_INTRINSICS].write("\(i.0.x), \(i.1.y), \(i.2.x), \(i.2.y)\n".data(using: .utf8)!)
-        }
-        
-        return true
-    }
+                fileHandlers.forEach { $0.write(timeHeader.data(using: .utf8)!) }
+                
+                // Write scaled intrinsics header
+                fileHandlers[ARKIT_CAMERA_INTRINSICS].write("# Intrinsics scaled for resized images\n".data(using: .utf8)!)
+                fileHandlers[ARKIT_CAMERA_INTRINSICS].write("fx, fy, ox, oy\n".data(using: .utf8)!)
+                
+                // Get the current frame to determine original resolution and intrinsics
+                if let currentFrame = sceneView.session.currentFrame {
+                    let originalIntrinsics = currentFrame.camera.intrinsics
+                    
+                    // Get original image dimensions
+                    let originalWidth = CGFloat(CVPixelBufferGetWidth(currentFrame.capturedImage))
+                    let originalHeight = CGFloat(CVPixelBufferGetHeight(currentFrame.capturedImage))
+                    
+                    // Calculate the actual resize scale we'll use
+                    let aspectRatio = originalWidth / originalHeight
+                    var targetSize: CGSize
+                    
+                    if originalWidth > originalHeight {
+                        targetSize = CGSize(width: TARGET_MAX_LENGTH, height: TARGET_MAX_LENGTH / aspectRatio)
+                    } else {
+                        targetSize = CGSize(width: TARGET_MAX_LENGTH * aspectRatio, height: TARGET_MAX_LENGTH)
+                    }
+                    
+                    // Calculate scaling factors
+                    let scaleX = targetSize.width / originalWidth
+                    let scaleY = targetSize.height / originalHeight
+                    
+                    // Scale the intrinsics
+                    let scaledFx = originalIntrinsics.columns.0.x * Float(scaleX)
+                    let scaledFy = originalIntrinsics.columns.1.y * Float(scaleY)
+                    let scaledOx = originalIntrinsics.columns.2.x * Float(scaleX)
+                    let scaledOy = originalIntrinsics.columns.2.y * Float(scaleY)
+                    
+                    // Write scaled intrinsics
+                    let intrinsicsLine = "\(scaledFx), \(scaledFy), \(scaledOx), \(scaledOy)\n"
+                    fileHandlers[ARKIT_CAMERA_INTRINSICS].write(intrinsicsLine.data(using: .utf8)!)
+                    
+                    // Log for debugging
+                    os_log("Original resolution: %.0fx%.0f", log: .default, type: .info, originalWidth, originalHeight)
+                    os_log("Target resolution: %.0fx%.0f", log: .default, type: .info, targetSize.width, targetSize.height)
+                    os_log("Scale factors: X=%.3f, Y=%.3f", log: .default, type: .info, scaleX, scaleY)
+                    os_log("Original intrinsics: fx=%.2f, fy=%.2f, ox=%.2f, oy=%.2f",
+                           log: .default, type: .info,
+                           originalIntrinsics.columns.0.x, originalIntrinsics.columns.1.y,
+                           originalIntrinsics.columns.2.x, originalIntrinsics.columns.2.y)
+                    os_log("Scaled intrinsics: fx=%.2f, fy=%.2f, ox=%.2f, oy=%.2f",
+                           log: .default, type: .info, scaledFx, scaledFy, scaledOx, scaledOy)
+                }
+                
+                return true
+            }
     
     private func flushPoseBuffer() {
         guard !poseDataBuffer.isEmpty, fileHandlers.indices.contains(ARKIT_CAMERA_POSE) else { return }
@@ -441,5 +522,71 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         let formatter = DateFormatter()
         formatter.dateFormat = forFilename ? "yyyy-MM-dd_HH-mm-ss" : "yyyy-MM-dd HH:mm:ss"
         return formatter.string(from: Date())
+    }
+}
+
+
+// At the bottom of ViewController.swift, outside the class definition
+// Improved resize extension
+extension UIImage {
+    func resizedToFit(maxLength: CGFloat) -> UIImage? {
+        guard let cgImage = self.cgImage else {
+            os_log("Resize failed: Could not get CGImage.", log: .default, type: .error)
+            return nil
+        }
+        
+        // Get the actual pixel dimensions
+        let originalWidth = CGFloat(cgImage.width)
+        let originalHeight = CGFloat(cgImage.height)
+        
+        os_log("Image Resizing: Original W:%.0f, H:%.0f", log: .default, type: .debug, originalWidth, originalHeight)
+
+        // Calculate the new size
+        let aspectRatio = originalWidth / originalHeight
+        var newSize: CGSize
+        
+        if originalWidth > originalHeight {
+            newSize = CGSize(width: maxLength, height: maxLength / aspectRatio)
+        } else {
+            newSize = CGSize(width: maxLength * aspectRatio, height: maxLength)
+        }
+        
+        os_log("Image Resizing: Calculated new W:%.0f, H:%.0f", log: .default, type: .debug, newSize.width, newSize.height)
+
+        // Create a bitmap context with explicit parameters
+        let width = Int(newSize.width)
+        let height = Int(newSize.height)
+        let bitsPerComponent = 8
+        let bytesPerRow = width * 4
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: bitsPerComponent,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            os_log("Failed to create CGContext for resizing", log: .default, type: .error)
+            return nil
+        }
+        
+        // Draw the image into the context
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        
+        // Create the final image
+        guard let resizedCGImage = context.makeImage() else {
+            os_log("Failed to create resized CGImage", log: .default, type: .error)
+            return nil
+        }
+        
+        // Create UIImage with explicit scale of 1.0
+        let resizedImage = UIImage(cgImage: resizedCGImage, scale: 1.0, orientation: .up)
+        
+        os_log("Image Resizing: Final W:%.0f, H:%.0f", log: .default, type: .debug, resizedImage.size.width, resizedImage.size.height)
+        
+        return resizedImage
     }
 }
