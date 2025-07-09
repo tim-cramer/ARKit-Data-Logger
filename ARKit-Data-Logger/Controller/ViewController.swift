@@ -29,17 +29,13 @@ enum UploadError: Error, LocalizedError {
 }
 
 /// A helper class to handle network requests for uploading data.
-// MARK: - MODIFIED: Made NetworkManager an NSObject subclass to conform to URLSessionTaskDelegate
 class NetworkManager: NSObject, URLSessionTaskDelegate {
 
-    // MARK: - ADDED: Property to hold the progress handler
     private var progressHandler: ((Float) -> Void)?
 
     /// Uploads a file to a specified server URL using an HTTP POST request.
-    // MARK: - MODIFIED: Added a progressHandler parameter
     func uploadFile(fileURL: URL, to serverEndpoint: String, progressHandler: @escaping (Float) -> Void, completion: @escaping (Result<Void, UploadError>) -> Void) {
         
-        // MARK: - ADDED: Store the progress handler
         self.progressHandler = progressHandler
         
         guard let url = URL(string: serverEndpoint) else {
@@ -72,7 +68,6 @@ class NetworkManager: NSObject, URLSessionTaskDelegate {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 10.0 // 10 second timeout
         
-        // MARK: - MODIFIED: Initialize session with delegate to self to receive progress updates
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         
         let task = session.uploadTask(with: request, from: data) { responseData, response, error in
@@ -102,7 +97,6 @@ class NetworkManager: NSObject, URLSessionTaskDelegate {
         task.resume()
     }
 
-    // MARK: - ADDED: URLSessionTaskDelegate method to track upload progress
     func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
         let progress = Float(totalBytesSent) / Float(totalBytesExpectedToSend)
         // This delegate method is called on a background thread, so dispatch to main for the handler.
@@ -123,21 +117,19 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     @IBOutlet weak var trackingStatusLabel: UILabel!
     @IBOutlet weak var worldMappingStatusLabel: UILabel!
     @IBOutlet weak var updateRateLabel: UILabel!
-    
-    // MARK: - ADDED: Connect this to a UIProgressView in your Storyboard
     @IBOutlet weak var progressView: UIProgressView!
     
     // MARK: - Properties
     var isRecording: Bool = false
-    let customQueue = DispatchQueue(label: "me.pyojinkim.arkitlogger", qos: .userInitiated, attributes: .concurrent)
+    let customQueue = DispatchQueue(label: "com.yourapp.arkitlogger", qos: .userInitiated, attributes: .concurrent)
     let captureInterval: TimeInterval = 1.0 / 5.0 // 5 FPS
     var lastCaptureTime: TimeInterval = 0
     
     let poseDataBatchSize = 100
     var poseDataBuffer: [String] = []
     
-    let ARKIT_CAMERA_POSE = 0
-    let ARKIT_CAMERA_INTRINSICS = 1
+    // MODIFIED: Simplified file handling for a single trajectory file
+    let ARKIT_LIDAR_POSE_FILE = 0
     var fileHandlers: [FileHandle] = []
     var sessionPath: URL?
     
@@ -178,9 +170,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     // MARK: - Setup
     private func setupUI() {
         statusLabel.text = "Ready to Record"
-        statusLabel.adjustsFontSizeToFitWidth = true // Allow text to shrink if needed
-        
-        // MARK: - ADDED: Configure progress view
+        statusLabel.adjustsFontSizeToFitWidth = true
         progressView.progress = 0
         progressView.isHidden = true
     }
@@ -220,9 +210,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     private func processAndUploadData() {
         DispatchQueue.main.async {
             self.statusLabel.text = "Processing data..."
-            self.startStopButton.isEnabled = false // Disable button to prevent multiple taps
-            
-            // MARK: - ADDED: Show and reset progress view
+            self.startStopButton.isEnabled = false
             self.progressView.isHidden = false
             self.progressView.progress = 0
         }
@@ -233,9 +221,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
             
             DispatchQueue.main.async { self.statusLabel.text = "Zipping files..." }
             
-            // MARK: - MODIFIED: Call the new zip function with a progress handler
             guard let zipURL = self.zipSessionFolder(at: self.sessionPath, progressHandler: { zipProgress in
-                // Zipping will account for the first 20% of the total progress.
                 let overallProgress = Float(zipProgress) * 0.2
                 self.progressView.setProgress(overallProgress, animated: true)
             }) else {
@@ -246,26 +232,20 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
             
             DispatchQueue.main.async { self.statusLabel.text = "Uploading to server..." }
             
-            // MARK: - MODIFIED: Call the new upload function with a progress handler
             self.networkManager.uploadFile(fileURL: zipURL, to: self.serverEndpoint, progressHandler: { uploadProgress in
-                // Uploading will account for the remaining 80% of the progress.
                 let overallProgress = 0.2 + (uploadProgress * 0.8)
                 self.progressView.setProgress(overallProgress, animated: true)
             }) { [weak self] result in
                 guard let self = self else { return }
                 
-                // Delete the local zip file
                 try? FileManager.default.removeItem(at: zipURL)
                 
                 switch result {
                 case .success:
                     self.statusLabel.text = "✅ Upload Complete!"
-                    
-                    // MARK: - ADDED: Delete the original session folder after successful upload
                     if let sessionPath = self.sessionPath {
                         try? FileManager.default.removeItem(at: sessionPath)
                     }
-                    
                     self.resetUIState()
                     
                 case .failure(let error):
@@ -277,45 +257,43 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         }
     }
 
-
     // MARK: - ARSessionDelegate
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         guard isRecording, frame.timestamp - lastCaptureTime >= captureInterval else { return }
         lastCaptureTime = frame.timestamp
         
         let timestamp = frame.timestamp
-        let cameraTransform = frame.camera.transform
         
         // Process everything on the background thread
         customQueue.async {
             // Step 1: Create a CIImage from the camera's pixel buffer.
             let ciImage = CIImage(cvPixelBuffer: frame.capturedImage)
 
-            // Step 2: Create a CGImage from the CIImage. This is a crucial intermediate step.
+            // Step 2: Create a CGImage from the CIImage.
             guard let cgImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else {
                 os_log("FATAL: Failed to create CGImage from CIImage.", log: .default, type: .fault)
                 return
             }
             
             // Step 3: Create the final, correctly oriented UIImage.
-            // The .right orientation is necessary to correct the raw landscape buffer from the camera.
-            // Use scale 1.0 to avoid any scaling artifacts
             let correctlyOrientedImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
             
-            // Step 4: Resize the new, stable image.
-            guard let resizedImage = correctlyOrientedImage.resizedToFit(maxLength: 640) else {
-                os_log("FATAL: Image resizing failed. Check the resizedToFit extension.", log: .default, type: .fault)
+            // Step 4: Resize the image.
+            guard let resizedImage = correctlyOrientedImage.resizedToFit(maxLength: self.TARGET_MAX_LENGTH) else {
+                os_log("FATAL: Image resizing failed.", log: .default, type: .fault)
                 return
             }
             
-            guard let jpgData = resizedImage.jpegData(compressionQuality: 0.75) else {
-                os_log("FATAL: Could not get JPEG data from the resized image.", log: .default, type: .fault)
+            // Step 5: Get PNG data
+            guard let pngData = resizedImage.pngData() else {
+                os_log("FATAL: Could not get PNG data from the resized image.", log: .default, type: .fault)
                 return
             }
 
-            // Log pose and image data
-            self.logPose(timestamp: timestamp, transform: cameraTransform)
-            self.logImage(timestamp: timestamp, jpgData: jpgData)
+            // Step 6: Log all necessary data for this frame
+            self.logPose(timestamp: timestamp, transform: frame.camera.transform)
+            self.logImage(timestamp: timestamp, pngData: pngData)
+            self.logIntrinsics(for: frame, timestamp: timestamp)
         }
         
         // Update UI on the main thread
@@ -326,12 +304,18 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     
     // MARK: - Logging Logic
     private func logPose(timestamp: TimeInterval, transform: simd_float4x4) {
+        // This format is "timestamp r1c1 r2c1 r3c1 r1c2 r2c2 r3c2 r1c3 r2c3 r3c3 x y z"
+        // which matches the TUM format used by many systems.
+        // The .traj file expects: timestamp tx ty tz qx qy qz qw
+        // But the python script shows it expects a 6-dim pose. Let's stick to the original format for now.
+        // It reads: timestamp, 12 pose matrix values
         let nanosecondTimestamp = timestamp * 1_000_000_000
         let poseString = String(format: "%.0f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
                                 nanosecondTimestamp,
-                                transform.columns.0.x, transform.columns.1.x, transform.columns.2.x, transform.columns.3.x,
-                                transform.columns.0.y, transform.columns.1.y, transform.columns.2.y, transform.columns.3.y,
-                                transform.columns.0.z, transform.columns.1.z, transform.columns.2.z, transform.columns.3.z)
+                                transform.columns.3.x, transform.columns.3.y, transform.columns.3.z, // Translation
+                                transform.columns.0.x, transform.columns.0.y, transform.columns.0.z, // Rotation matrix part
+                                transform.columns.1.x, transform.columns.1.y, transform.columns.1.z,
+                                transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
         
         poseDataBuffer.append(poseString)
         if poseDataBuffer.count >= poseDataBatchSize {
@@ -339,90 +323,95 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         }
     }
     
-    private func logImage(timestamp: TimeInterval, jpgData: Data) {
-        guard let colorPath = self.sessionPath?.appendingPathComponent("color") else { return }
+    private func logImage(timestamp: TimeInterval, pngData: Data) {
+        guard let lowresWidePath = self.sessionPath?.appendingPathComponent("lowres_wide") else { return }
         let nanosecondTimestamp = timestamp * 1_000_000_000
-        let filename = colorPath.appendingPathComponent("\(String(format: "%.0f", nanosecondTimestamp)).jpg")
+        let filename = lowresWidePath.appendingPathComponent("\(String(format: "%.0f", nanosecondTimestamp)).png")
         
         do {
-            try jpgData.write(to: filename)
+            try pngData.write(to: filename)
         } catch {
-            os_log("Failed to write JPG data: %@", log: .default, type: .error, error.localizedDescription)
+            os_log("Failed to write PNG data: %@", log: .default, type: .error, error.localizedDescription)
         }
     }
     
+    private func logIntrinsics(for frame: ARFrame, timestamp: TimeInterval) {
+        guard let intrinsicsPath = self.sessionPath?.appendingPathComponent("lowres_wide_intrinsics") else { return }
+
+        let originalIntrinsics = frame.camera.intrinsics
+        let originalWidth = CGFloat(CVPixelBufferGetWidth(frame.capturedImage))
+        let originalHeight = CGFloat(CVPixelBufferGetHeight(frame.capturedImage))
+        
+        // Calculate the actual resize scale used
+        let aspectRatio = originalWidth / originalHeight
+        var targetSize: CGSize
+        
+        if originalWidth > originalHeight { // Landscape
+            targetSize = CGSize(width: TARGET_MAX_LENGTH, height: TARGET_MAX_LENGTH / aspectRatio)
+        } else { // Portrait
+            targetSize = CGSize(width: TARGET_MAX_LENGTH * aspectRatio, height: TARGET_MAX_LENGTH)
+        }
+        
+        // The orientation is rotated right, so width/height are swapped for scaling calculation
+        let scaleX = targetSize.height / originalWidth
+        let scaleY = targetSize.width / originalHeight
+        
+        // Scale the intrinsics
+        let scaledFx = originalIntrinsics.columns.0.x * Float(scaleX)
+        let scaledFy = originalIntrinsics.columns.1.y * Float(scaleY)
+        let scaledOx = originalIntrinsics.columns.2.x * Float(scaleX)
+        let scaledOy = originalIntrinsics.columns.2.y * Float(scaleY)
+        
+        let intrinsicsLine = "\(scaledFx) \(scaledFy) \(scaledOx) \(scaledOy)\n"
+        
+        let nanosecondTimestamp = timestamp * 1_000_000_000
+        let filename = intrinsicsPath.appendingPathComponent("\(String(format: "%.0f", nanosecondTimestamp)).pincam")
+
+        do {
+            try intrinsicsLine.data(using: .utf8)?.write(to: filename)
+        } catch {
+            os_log("Failed to write pincam file: %@", log: .default, type: .error, error.localizedDescription)
+        }
+    }
+
     // MARK: - File I/O & Zipping
     private func createSessionDirectoryAndFiles() -> Bool {
-            fileHandlers.removeAll(); poseDataBuffer.removeAll()
+        fileHandlers.removeAll(); poseDataBuffer.removeAll()
             
-            guard let docPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
+        guard let docPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
             
-            let newSessionPath = docPath.appendingPathComponent("arkit_session_\(timeToString(true))")
-            let colorFolderPath = newSessionPath.appendingPathComponent("color")
+        let newSessionPath = docPath.appendingPathComponent("arkit_session_\(timeToString(true))")
+        // ⭐️ MODIFIED: Create directories expected by locate-3d
+        let lowresWidePath = newSessionPath.appendingPathComponent("lowres_wide")
+        let lowresIntrinsicsPath = newSessionPath.appendingPathComponent("lowres_wide_intrinsics")
 
-            do {
-                try FileManager.default.createDirectory(at: colorFolderPath, withIntermediateDirectories: true, attributes: nil)
-                self.sessionPath = newSessionPath
-            } catch {
-                os_log("Failed to create session directory: %@", log: .default, type: .error, error.localizedDescription)
-                return false
-            }
-            
-            // MARK: - ⭐️ MODIFIED: Renamed files to match Locate3D's expected input.
-            let fileNames = ["poses.txt", "intrinsics.txt"]
-            for i in 0..<fileNames.count {
-                let url = newSessionPath.appendingPathComponent(fileNames[i])
-                do {
-                    try "".write(to: url, atomically: true, encoding: .utf8)
-                    let fileHandle = try FileHandle(forWritingTo: url)
-                    fileHandlers.append(fileHandle)
-                } catch {
-                    os_log("Failed to create file handle for %@: %@", log: .default, type: .error, url.lastPathComponent, error.localizedDescription)
-                    return false
-                }
-            }
-            
-            // MARK: - ⭐️ REMOVED: All header writing to keep files clean for preprocessing.
-            
-            // Get the current frame to determine original resolution and intrinsics
-            if let currentFrame = sceneView.session.currentFrame {
-                let originalIntrinsics = currentFrame.camera.intrinsics
-                
-                // Get original image dimensions
-                let originalWidth = CGFloat(CVPixelBufferGetWidth(currentFrame.capturedImage))
-                let originalHeight = CGFloat(CVPixelBufferGetHeight(currentFrame.capturedImage))
-                
-                // Calculate the actual resize scale we'll use
-                let aspectRatio = originalWidth / originalHeight
-                var targetSize: CGSize
-                
-                if originalWidth > originalHeight {
-                    targetSize = CGSize(width: TARGET_MAX_LENGTH, height: TARGET_MAX_LENGTH / aspectRatio)
-                } else {
-                    targetSize = CGSize(width: TARGET_MAX_LENGTH * aspectRatio, height: TARGET_MAX_LENGTH)
-                }
-                
-                // Calculate scaling factors
-                let scaleX = targetSize.width / originalWidth
-                let scaleY = targetSize.height / originalHeight
-                
-                // Scale the intrinsics
-                let scaledFx = originalIntrinsics.columns.0.x * Float(scaleX)
-                let scaledFy = originalIntrinsics.columns.1.y * Float(scaleY)
-                let scaledOx = originalIntrinsics.columns.2.x * Float(scaleX)
-                let scaledOy = originalIntrinsics.columns.2.y * Float(scaleY)
-                
-                // MARK: - ⭐️ MODIFIED: Write intrinsics as a single, space-separated line.
-                let intrinsicsLine = "\(scaledFx) \(scaledFy) \(scaledOx) \(scaledOy)\n"
-                fileHandlers[ARKIT_CAMERA_INTRINSICS].write(intrinsicsLine.data(using: .utf8)!)
-            }
-            
-            return true
+        do {
+            try FileManager.default.createDirectory(at: lowresWidePath, withIntermediateDirectories: true, attributes: nil)
+            try FileManager.default.createDirectory(at: lowresIntrinsicsPath, withIntermediateDirectories: true, attributes: nil)
+            self.sessionPath = newSessionPath
+        } catch {
+            os_log("Failed to create session directories: %@", log: .default, type: .error, error.localizedDescription)
+            return false
         }
-    
+            
+        // ⭐️ MODIFIED: Create only the trajectory file now
+        let fileName = "lowres_wide.traj"
+        let url = newSessionPath.appendingPathComponent(fileName)
+        do {
+            try "".write(to: url, atomically: true, encoding: .utf8)
+            let fileHandle = try FileHandle(forWritingTo: url)
+            fileHandlers.append(fileHandle)
+        } catch {
+            os_log("Failed to create file handle for %@: %@", log: .default, type: .error, url.lastPathComponent, error.localizedDescription)
+            return false
+        }
+            
+        return true
+    }
+
     private func flushPoseBuffer() {
-        guard !poseDataBuffer.isEmpty, fileHandlers.indices.contains(ARKIT_CAMERA_POSE) else { return }
-        fileHandlers[ARKIT_CAMERA_POSE].write(poseDataBuffer.joined().data(using: .utf8)!)
+        guard !poseDataBuffer.isEmpty, fileHandlers.indices.contains(ARKIT_LIDAR_POSE_FILE) else { return }
+        fileHandlers[ARKIT_LIDAR_POSE_FILE].write(poseDataBuffer.joined().data(using: .utf8)!)
         poseDataBuffer.removeAll()
     }
     
@@ -430,7 +419,6 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         fileHandlers.forEach { $0.closeFile() }
     }
     
-    // MARK: - MODIFIED: Update function to accept a progress handler
     private func zipSessionFolder(at sourceURL: URL?, progressHandler: @escaping (Double) -> Void) -> URL? {
         guard let sourceURL = sourceURL else { return nil }
         
@@ -438,9 +426,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
             let zipURL = FileManager.default.temporaryDirectory.appendingPathComponent(sourceURL.lastPathComponent + ".zip")
             try? FileManager.default.removeItem(at: zipURL)
             
-            // Pass the progress handler to the Zip library
             try Zip.zipFiles(paths: [sourceURL], zipFilePath: zipURL, password: nil, progress: { progress in
-                // This closure is not guaranteed to be on the main thread.
                 DispatchQueue.main.async {
                     progressHandler(progress)
                 }
@@ -478,8 +464,6 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         startStopButton.setTitle("Start", for: .normal)
         startStopButton.setTitleColor(.systemGreen, for: .normal)
         statusLabel.text = "Ready to Record"
-        
-        // MARK: - ADDED: Hide and reset progress view
         progressView.isHidden = true
         progressView.progress = 0
     }
@@ -534,9 +518,6 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     }
 }
 
-
-// At the bottom of ViewController.swift, outside the class definition
-// Improved resize extension
 extension UIImage {
     func resizedToFit(maxLength: CGFloat) -> UIImage? {
         guard let cgImage = self.cgImage else {
@@ -544,11 +525,9 @@ extension UIImage {
             return nil
         }
         
-        // Get the actual pixel dimensions
         let originalWidth = CGFloat(cgImage.width)
         let originalHeight = CGFloat(cgImage.height)
 
-        // Calculate the new size
         let aspectRatio = originalWidth / originalHeight
         var newSize: CGSize
         
@@ -558,7 +537,6 @@ extension UIImage {
             newSize = CGSize(width: maxLength * aspectRatio, height: maxLength)
         }
         
-        // Create a bitmap context with explicit parameters
         let width = Int(newSize.width)
         let height = Int(newSize.height)
         let bitsPerComponent = 8
@@ -578,16 +556,13 @@ extension UIImage {
             return nil
         }
         
-        // Draw the image into the context
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
         
-        // Create the final image
         guard let resizedCGImage = context.makeImage() else {
             os_log("Failed to create resized CGImage", log: .default, type: .error)
             return nil
         }
         
-        // Create UIImage with explicit scale of 1.0
         let resizedImage = UIImage(cgImage: resizedCGImage, scale: 1.0, orientation: .up)
         
         return resizedImage
