@@ -15,7 +15,6 @@ enum UploadError: Error, LocalizedError {
         case .invalidURL:
             return "The server URL was invalid."
         case .networkError(let error):
-            // Check if the error is a timeout.
             if let urlError = error as? URLError, urlError.code == .timedOut {
                 return "The connection timed out. Please check the server IP address and your Wi-Fi connection."
             }
@@ -33,7 +32,6 @@ class NetworkManager: NSObject, URLSessionTaskDelegate {
 
     private var progressHandler: ((Float) -> Void)?
 
-    /// Uploads a file to a specified server URL using an HTTP POST request.
     func uploadFile(fileURL: URL, to serverEndpoint: String, progressHandler: @escaping (Float) -> Void, completion: @escaping (Result<Void, UploadError>) -> Void) {
         
         self.progressHandler = progressHandler
@@ -99,7 +97,6 @@ class NetworkManager: NSObject, URLSessionTaskDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
         let progress = Float(totalBytesSent) / Float(totalBytesExpectedToSend)
-        // This delegate method is called on a background thread, so dispatch to main for the handler.
         DispatchQueue.main.async {
             self.progressHandler?(progress)
         }
@@ -128,7 +125,6 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     let poseDataBatchSize = 100
     var poseDataBuffer: [String] = []
     
-    // MODIFIED: Simplified file handling for a single trajectory file
     let ARKIT_LIDAR_POSE_FILE = 0
     var fileHandlers: [FileHandle] = []
     var sessionPath: URL?
@@ -147,7 +143,6 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     let ciContext = CIContext(options: nil)
 
     let networkManager = NetworkManager()
-    // ‼️ IMPORTANT: Replace this with your computer's local IP address.
     let serverEndpoint = "http://10.1.74.4:8080/process-scene"
     
     // MARK: - View Lifecycle
@@ -264,39 +259,32 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         
         let timestamp = frame.timestamp
         
-        // Process everything on the background thread
         customQueue.async {
-            // Step 1: Create a CIImage from the camera's pixel buffer.
             let ciImage = CIImage(cvPixelBuffer: frame.capturedImage)
 
-            // Step 2: Create a CGImage from the CIImage.
             guard let cgImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else {
                 os_log("FATAL: Failed to create CGImage from CIImage.", log: .default, type: .fault)
                 return
             }
             
-            // Step 3: Create the final, correctly oriented UIImage.
-            let correctlyOrientedImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
+            // ✅ SIMPLIFIED: Create a UIImage with no rotation. It remains in its native landscape orientation.
+            let landscapeImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
             
-            // Step 4: Resize the image.
-            guard let resizedImage = correctlyOrientedImage.resizedToFit(maxLength: self.TARGET_MAX_LENGTH) else {
+            guard let resizedImage = landscapeImage.resizedToFit(maxLength: self.TARGET_MAX_LENGTH) else {
                 os_log("FATAL: Image resizing failed.", log: .default, type: .fault)
                 return
             }
             
-            // Step 5: Get PNG data
             guard let pngData = resizedImage.pngData() else {
                 os_log("FATAL: Could not get PNG data from the resized image.", log: .default, type: .fault)
                 return
             }
 
-            // Step 6: Log all necessary data for this frame
             self.logPose(timestamp: timestamp, transform: frame.camera.transform)
             self.logImage(timestamp: timestamp, pngData: pngData)
             self.logIntrinsics(for: frame, timestamp: timestamp)
         }
         
-        // Update UI on the main thread
         DispatchQueue.main.async {
             self.updateDebugUI(with: frame)
         }
@@ -304,23 +292,28 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     
     // MARK: - Logging Logic
     private func logPose(timestamp: TimeInterval, transform: simd_float4x4) {
-        // This format is "timestamp r1c1 r2c1 r3c1 r1c2 r2c2 r3c2 r1c3 r2c3 r3c3 x y z"
-        // which matches the TUM format used by many systems.
-        // The .traj file expects: timestamp tx ty tz qx qy qz qw
-        // But the python script shows it expects a 6-dim pose. Let's stick to the original format for now.
-        // It reads: timestamp, 12 pose matrix values
-        let nanosecondTimestamp = timestamp * 1_000_000_000
-        let poseString = String(format: "%.0f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
-                                nanosecondTimestamp,
-                                transform.columns.3.x, transform.columns.3.y, transform.columns.3.z, // Translation
-                                transform.columns.0.x, transform.columns.0.y, transform.columns.0.z, // Rotation matrix part
-                                transform.columns.1.x, transform.columns.1.y, transform.columns.1.z,
-                                transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
-        
+        let cameraToWorld = transform
+        let translation = cameraToWorld.columns.3
+
+        let rotationMatrix = simd_float3x3(
+            SIMD3(cameraToWorld.columns.0.x, cameraToWorld.columns.0.y, cameraToWorld.columns.0.z),
+            SIMD3(cameraToWorld.columns.1.x, cameraToWorld.columns.1.y, cameraToWorld.columns.1.z),
+            SIMD3(cameraToWorld.columns.2.x, cameraToWorld.columns.2.y, cameraToWorld.columns.2.z)
+        )
+
+        // Convert to quaternion
+        let rotationQuat = simd_quatf(rotationMatrix)
+        let axis = rotationQuat.axis
+        let angle = rotationQuat.angle
+        let rotationVector = SIMD3<Float>(axis.x * angle, axis.y * angle, axis.z * angle)
+
+        let poseString = String(format: "%.8f %.8f %.8f %.8f %.8f %.8f %.8f\n",
+            timestamp, // possibly in seconds!
+            rotationVector.x, rotationVector.y, rotationVector.z,
+            translation.x, translation.y, translation.z
+            
+        )
         poseDataBuffer.append(poseString)
-        if poseDataBuffer.count >= poseDataBatchSize {
-            flushPoseBuffer()
-        }
     }
     
     private func logImage(timestamp: TimeInterval, pngData: Data) {
@@ -335,45 +328,53 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         }
     }
     
+    // MARK: - ✅ SIMPLIFIED Intrinsics Logging for Landscape
     private func logIntrinsics(for frame: ARFrame, timestamp: TimeInterval) {
         guard let intrinsicsPath = self.sessionPath?.appendingPathComponent("lowres_wide_intrinsics") else { return }
 
-        let originalIntrinsics = frame.camera.intrinsics
+        // Get native landscape intrinsics
+        let intrinsics = frame.camera.intrinsics
+        
+        // Get original dimensions
         let originalWidth = CGFloat(CVPixelBufferGetWidth(frame.capturedImage))
         let originalHeight = CGFloat(CVPixelBufferGetHeight(frame.capturedImage))
         
-        // Calculate the actual resize scale used
+        // ✅ FIXED: Calculate proper scaling for resized image
         let aspectRatio = originalWidth / originalHeight
-        var targetSize: CGSize
+        var newWidth: CGFloat
+        var newHeight: CGFloat
         
-        if originalWidth > originalHeight { // Landscape
-            targetSize = CGSize(width: TARGET_MAX_LENGTH, height: TARGET_MAX_LENGTH / aspectRatio)
-        } else { // Portrait
-            targetSize = CGSize(width: TARGET_MAX_LENGTH * aspectRatio, height: TARGET_MAX_LENGTH)
+        if originalWidth > originalHeight {
+            newWidth = TARGET_MAX_LENGTH
+            newHeight = TARGET_MAX_LENGTH / aspectRatio
+        } else {
+            newWidth = TARGET_MAX_LENGTH * aspectRatio
+            newHeight = TARGET_MAX_LENGTH
         }
         
-        // The orientation is rotated right, so width/height are swapped for scaling calculation
-        let scaleX = targetSize.height / originalWidth
-        let scaleY = targetSize.width / originalHeight
+        let scaleX = Float(newWidth) / Float(originalWidth)
+        let scaleY = Float(newHeight) / Float(originalHeight)
         
-        // Scale the intrinsics
-        let scaledFx = originalIntrinsics.columns.0.x * Float(scaleX)
-        let scaledFy = originalIntrinsics.columns.1.y * Float(scaleY)
-        let scaledOx = originalIntrinsics.columns.2.x * Float(scaleX)
-        let scaledOy = originalIntrinsics.columns.2.y * Float(scaleY)
+        // Scale intrinsics appropriately
+        let scaledFx = intrinsics.columns.0.x * scaleX
+        let scaledFy = intrinsics.columns.1.y * scaleY
+        let scaledCx = intrinsics.columns.2.x * scaleX
+        let scaledCy = intrinsics.columns.2.y * scaleY
         
-        let intrinsicsLine = "\(scaledFx) \(scaledFy) \(scaledOx) \(scaledOy)\n"
+        // ✅ IMPORTANT: Also log the actual image dimensions for unprojection
+        let intrinsicsLine = "\(Int(newWidth)) \(Int(newHeight)) \(scaledFx) \(scaledFy) \(scaledCx) \(scaledCy)\n"
         
         let nanosecondTimestamp = timestamp * 1_000_000_000
         let filename = intrinsicsPath.appendingPathComponent("\(String(format: "%.0f", nanosecondTimestamp)).pincam")
 
         do {
-            try intrinsicsLine.data(using: .utf8)?.write(to: filename)
+            if let dataToWrite = intrinsicsLine.data(using: .utf8) {
+                try dataToWrite.write(to: filename)
+            }
         } catch {
             os_log("Failed to write pincam file: %@", log: .default, type: .error, error.localizedDescription)
         }
     }
-
     // MARK: - File I/O & Zipping
     private func createSessionDirectoryAndFiles() -> Bool {
         fileHandlers.removeAll(); poseDataBuffer.removeAll()
@@ -381,7 +382,6 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         guard let docPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
             
         let newSessionPath = docPath.appendingPathComponent("arkit_session_\(timeToString(true))")
-        // ⭐️ MODIFIED: Create directories expected by locate-3d
         let lowresWidePath = newSessionPath.appendingPathComponent("lowres_wide")
         let lowresIntrinsicsPath = newSessionPath.appendingPathComponent("lowres_wide_intrinsics")
 
@@ -394,7 +394,6 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
             return false
         }
             
-        // ⭐️ MODIFIED: Create only the trajectory file now
         let fileName = "lowres_wide.traj"
         let url = newSessionPath.appendingPathComponent(fileName)
         do {
@@ -411,7 +410,11 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 
     private func flushPoseBuffer() {
         guard !poseDataBuffer.isEmpty, fileHandlers.indices.contains(ARKIT_LIDAR_POSE_FILE) else { return }
-        fileHandlers[ARKIT_LIDAR_POSE_FILE].write(poseDataBuffer.joined().data(using: .utf8)!)
+        
+        let bufferString = poseDataBuffer.joined()
+        if let data = bufferString.data(using: .utf8) {
+            fileHandlers[ARKIT_LIDAR_POSE_FILE].write(data)
+        }
         poseDataBuffer.removeAll()
     }
     
@@ -563,8 +566,29 @@ extension UIImage {
             return nil
         }
         
+        // ✅ FIXED: Maintain consistent orientation
         let resizedImage = UIImage(cgImage: resizedCGImage, scale: 1.0, orientation: .up)
         
         return resizedImage
     }
+}
+
+private func validateCameraSetup(for frame: ARFrame) {
+    // This is helpful for debugging your 3D unprojection pipeline
+    let transform = frame.camera.transform
+    let intrinsics = frame.camera.intrinsics
+    
+    // Log camera parameters for validation
+    os_log("Camera Transform (Camera-to-World):", log: .default, type: .info)
+    os_log("  Translation: [%.3f, %.3f, %.3f]", log: .default, type: .info,
+           transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+    
+    os_log("Intrinsics Matrix:", log: .default, type: .info)
+    os_log("  fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f", log: .default, type: .info,
+           intrinsics.columns.0.x, intrinsics.columns.1.y,
+           intrinsics.columns.2.x, intrinsics.columns.2.y)
+    
+    let imageResolution = frame.camera.imageResolution
+    os_log("Image Resolution: %.0f x %.0f", log: .default, type: .info,
+           imageResolution.width, imageResolution.height)
 }
