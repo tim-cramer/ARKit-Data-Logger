@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		00154C0D2E2A75A00052C630 /* NetworkMangager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00154C0C2E2A759A0052C630 /* NetworkMangager.swift */; };
 		0044A4892E1A849C00456216 /* Zip in Frameworks */ = {isa = PBXBuildFile; productRef = 0044A4882E1A849C00456216 /* Zip */; };
 		00B1DB8C2E1A7A470079AC50 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B1DB8B2E1A7A450079AC50 /* SceneDelegate.swift */; };
 		2E0C77BB22A7478C00C2D672 /* UsefulFunctions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E0C77BA22A7478C00C2D672 /* UsefulFunctions.swift */; };
@@ -19,6 +20,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		00154C0C2E2A759A0052C630 /* NetworkMangager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMangager.swift; sourceTree = "<group>"; };
 		00B1DB8B2E1A7A450079AC50 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		2E0C77BA22A7478C00C2D672 /* UsefulFunctions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsefulFunctions.swift; sourceTree = "<group>"; };
 		2EC6C5FC22A673C2001C517D /* ARKit-Data-Logger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "ARKit-Data-Logger.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -43,13 +45,6 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		2E7A6D3D22C4B6CC007B7FBD /* Model */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			path = Model;
-			sourceTree = "<group>";
-		};
 		2E7A6D3E22C4B70D007B7FBD /* View */ = {
 			isa = PBXGroup;
 			children = (
@@ -61,6 +56,7 @@
 		2E7A6D3F22C4B72F007B7FBD /* Controller */ = {
 			isa = PBXGroup;
 			children = (
+				00154C0C2E2A759A0052C630 /* NetworkMangager.swift */,
 				2EC6C60322A673C2001C517D /* ViewController.swift */,
 			);
 			path = Controller;
@@ -86,7 +82,6 @@
 			isa = PBXGroup;
 			children = (
 				00B1DB8B2E1A7A450079AC50 /* SceneDelegate.swift */,
-				2E7A6D3D22C4B6CC007B7FBD /* Model */,
 				2E7A6D3E22C4B70D007B7FBD /* View */,
 				2E7A6D3F22C4B72F007B7FBD /* Controller */,
 				2EC6C60822A673C3001C517D /* Assets.xcassets */,
@@ -178,6 +173,7 @@
 				2E0C77BB22A7478C00C2D672 /* UsefulFunctions.swift in Sources */,
 				2EC6C60022A673C2001C517D /* AppDelegate.swift in Sources */,
 				00B1DB8C2E1A7A470079AC50 /* SceneDelegate.swift in Sources */,
+				00154C0D2E2A75A00052C630 /* NetworkMangager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
